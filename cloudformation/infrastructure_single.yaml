@@ -1,0 +1,288 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Single-node computing sample infrastructure using Lambda.
+
+Parameters:
+
+  AppName:
+    Type: String
+    Default: DistComp-Single
+    Description: Application name.
+  
+  AppDescription:
+    Type: String
+    Default: Sindle-Node computing sample infrastructure using Lambda.
+    Description: Application description.
+  
+  stagename:
+    Type: String
+    Default: dev
+    Description: API deployment stage, preferrably org / tier name.
+  
+  pathpart:
+    Type: String
+    Default: process
+    Description: API main resource path part.
+  
+  sourcebucket:
+    Type: String
+    Description: Lambda function source S3 bucket name.
+
+  lambdazip:
+    Type: String
+    Default: lambda_single.zip
+    Description: Lambda function ZIP file.
+
+Mappings:
+
+  apigateway:
+    common:
+      burst: 500
+      rate: 1000
+      quota: 10000
+      period: MONTH
+
+  lambda:
+    common:
+      memorysize: 128
+      runtime: python3.8
+      timeout: 3
+
+Resources:
+
+  # DynamoDB table.
+  DynamoDB:
+    Type: AWS::DynamoDB::Table
+    Properties: 
+      AttributeDefinitions: 
+        - AttributeName: id
+          AttributeType: S
+      BillingMode: PAY_PER_REQUEST
+      KeySchema: 
+        - AttributeName: id
+          KeyType: HASH
+      PointInTimeRecoverySpecification: 
+        PointInTimeRecoveryEnabled: false
+      SSESpecification: 
+        SSEEnabled: false
+  
+  # Process Lambda execution role.
+  lambdarole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+        - 'arn:aws:iam::aws:policy/AmazonDynamoDBFullAccess'
+    DependsOn:
+      - DynamoDB
+  
+  # Process Lambda function.
+  lambdafunction:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Description: !Sub ${AppDescription}
+      Code:
+        S3Bucket: !Sub ${sourcebucket}
+        S3Key: !Sub ${lambdazip}
+      Environment:
+        Variables:
+          DBTABLE: !Sub ${DynamoDB}
+      Handler: lambda_function.lambda_handler
+      MemorySize: !FindInMap 
+        - lambda
+        - common
+        - memorysize
+      Role: !Sub ${lambdarole.Arn}
+      Runtime: !FindInMap 
+        - lambda
+        - common
+        - runtime
+      Timeout: !FindInMap 
+        - lambda
+        - common
+        - timeout
+    DependsOn:
+      - lambdarole
+
+  # API.
+  api:
+    Type: 'AWS::ApiGateway::RestApi'
+    Properties:
+      Description: !Sub ${AppDescription}
+      Name: !Sub ${AppName}
+      ApiKeySourceType: HEADER
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+  requestmodel:
+    Type: AWS::ApiGateway::Model
+    Properties: 
+      ContentType: application/json
+      Description: Request schema model.
+      RestApiId: !Sub ${api}
+      Schema:
+        "$schema": "http://json-schema.org/draft-04/schema#"
+        "title": "DataModel"
+        "type": "object"
+        "properties":
+          "data":
+            "type": "string"
+  requestvalidator:
+    Type: AWS::ApiGateway::RequestValidator
+    Properties: 
+      RestApiId: !Sub ${api}
+      ValidateRequestBody: true
+      ValidateRequestParameters: true
+  resource:
+    Type: 'AWS::ApiGateway::Resource'
+    Properties:
+      ParentId: !Sub ${api.RootResourceId}
+      PathPart: !Sub ${pathpart}
+      RestApiId: !Sub ${api}
+  method:
+    Type: 'AWS::ApiGateway::Method'
+    Properties:
+      ApiKeyRequired: true
+      AuthorizationType: NONE
+      HttpMethod: POST
+      Integration:
+        IntegrationHttpMethod: POST
+        IntegrationResponses:
+          - StatusCode: '200'
+        Type: AWS_PROXY
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${lambdafunction.Arn}/invocations
+      MethodResponses:
+        - StatusCode: '200'
+          ResponseModels:
+            "application/json": "Empty"
+          ResponseParameters:
+            "method.response.header.Access-Control-Allow-Origin": true
+      ResourceId: !Sub ${resource}
+      RestApiId: !Sub ${api}
+      RequestModels: 
+        "application/json": !Sub ${requestmodel}
+      RequestParameters: 
+        "method.request.header.x-api-key": true
+      RequestValidatorId: !Sub ${requestvalidator}
+    DependsOn:
+      - resource
+      - lambdafunction
+      - requestvalidator
+  options:
+    Type: 'AWS::ApiGateway::Method'
+    Properties:
+      ApiKeyRequired: false
+      AuthorizationType: NONE
+      HttpMethod: OPTIONS
+      Integration:
+        IntegrationHttpMethod: OPTIONS
+        IntegrationResponses:
+          - StatusCode: '200'
+            ResponseParameters:
+              "method.response.header.Access-Control-Allow-Headers": "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+              "method.response.header.Access-Control-Allow-Methods": "'POST,OPTIONS'"
+              "method.response.header.Access-Control-Allow-Origin": "'*'"
+        PassthroughBehavior: WHEN_NO_MATCH # WHEN_NO_TEMPLATES, WHEN_NO_MATCH, NEVER
+        RequestTemplates:
+          "application/json": "{\"statusCode\": 200}"
+        Type: MOCK
+      MethodResponses:
+        - StatusCode: '200'
+          ResponseModels:
+            "application/json": Empty
+          ResponseParameters:
+            "method.response.header.Access-Control-Allow-Headers": true
+            "method.response.header.Access-Control-Allow-Methods": true
+            "method.response.header.Access-Control-Allow-Origin": true
+      ResourceId: !Sub ${resource}
+      RestApiId: !Sub ${api}
+  lambdapermission:
+    Type: 'AWS::Lambda::Permission'
+    Properties:
+      FunctionName: !Sub ${lambdafunction.Arn}
+      Action: 'lambda:InvokeFunction'
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${api}/*/POST/${pathpart}'
+    DependsOn:
+      - method
+  stage:
+    Type: 'AWS::ApiGateway::Deployment'
+    Properties:
+      RestApiId: !Sub ${api}
+      StageDescription:
+        ThrottlingBurstLimit: !FindInMap 
+          - apigateway
+          - common
+          - burst
+        ThrottlingRateLimit: !FindInMap 
+          - apigateway
+          - common
+          - rate
+      StageName: !Sub ${stagename}
+    DependsOn:
+      - api
+      - method
+      - options
+  usageplan:
+    Type: 'AWS::ApiGateway::UsagePlan'
+    Properties:
+      ApiStages:
+        - ApiId: !Sub ${api}
+          Stage: !Sub ${stagename}
+      Quota:
+        Limit: !FindInMap 
+          - apigateway
+          - common
+          - quota
+        Period: !FindInMap 
+          - apigateway
+          - common
+          - period
+      Throttle:
+        BurstLimit: !FindInMap 
+          - apigateway
+          - common
+          - burst
+        RateLimit: !FindInMap 
+          - apigateway
+          - common
+          - rate
+    DependsOn:
+      - stage
+  apikey:
+    Type: 'AWS::ApiGateway::ApiKey'
+    Properties:
+      Enabled: true
+      StageKeys:
+        - RestApiId: !Sub ${api}
+          StageName: !Sub ${stagename}
+    DependsOn:
+      - api
+      - stage
+  plankey:
+    Type: 'AWS::ApiGateway::UsagePlanKey'
+    Properties:
+      KeyId: !Sub ${apikey}
+      KeyType: API_KEY
+      UsagePlanId: !Sub ${usageplan}
+    DependsOn:
+      - apikey
+      - usageplan
+
+Outputs:
+
+  DataDBTable:
+    Value: !Sub ${DynamoDB}
+    Description: Processed data table.
+  
+  APIGatewayDeploy:
+    Value: !Sub aws apigateway create-deployment --rest-api-id ${api} --stage-name ${stagename} --description ${AppName}_stage_activation --profile <Your-AWSCLI-profile>
+    Description: Command to activate API after deployment is complete.

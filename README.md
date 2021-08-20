@@ -6,6 +6,14 @@ Proof-of-concept experiment for distributed computing using AWS Lambda as data c
 
 ### Deployment Steps
 
+Fastest:
+
+1. Deploy from AWS Serverless Application Repository: https://console.aws.amazon.com/lambda/home?region=us-east-1#/create/app?applicationId=arn:aws:serverlessrepo:ap-southeast-1:798471383856:applications/lambda-distributed
+
+    > You can change the home region from **us-east-1** to your own working region.
+
+(Just) Slightly less fast:
+
 1. (Optional) Update Lambda functions as necessary, and repackage functions and modules as ZIP files.
 2. Place ZIP files in an S3 bucket.
 3. Deploy CloudFormation templates, filling-in corresponding parameters.
@@ -53,7 +61,7 @@ Currently, the flow works like the following:
 
 The scripts read data from text files. The distributed / multiprocessing script does so using Python3's *multiprocessing* module, while the single-node script uses a *for* loop.
 
-1. Distributed execution section:
+1. Distributed execution section
 
     ```python
     with open(sys.argv[2], 'r') as f:

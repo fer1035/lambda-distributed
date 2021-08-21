@@ -192,7 +192,6 @@ Resources:
               - sts:AssumeRole
       ManagedPolicyArns:
         - 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
-        - 'arn:aws:iam::aws:policy/AmazonDynamoDBFullAccess'
         - 'arn:aws:iam::aws:policy/AWSXrayWriteOnlyAccess'
       Policies:
         - PolicyName: !Sub '${AppName}-Process-SQSQueue-${AWS::AccountId}'
@@ -207,9 +206,18 @@ Resources:
                   - sqs:ChangeMessageVisibility
                 Resource:
                   - !Sub ${SQSQueue.Arn}
+        - PolicyName: !Sub '${AppName}-Process-DynamoDB-${AWS::AccountId}'
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                Resource:
+                  - !Sub ${DynamoDB.Arn}
     DependsOn:
-      - DynamoDB
       - SQSQueue
+      - DynamoDB
   
   # Dead-letter lambda execution role.
   lambdaroledead:

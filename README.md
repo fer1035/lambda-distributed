@@ -97,17 +97,23 @@ The scripts read data from text files. The distributed / multiprocessing script 
 ## Source
 
 1. cloudformation
-    - infrastructure.yaml - complete infrastructure to provision resources in an AWS account (charges may apply):
+    - infrastructure.yaml - provision resources in an AWS account (charges may apply):
         - API Gateway
         - Lambda
         - Simple Queue Service (SQS)
         - Simple Notification Service (SNS)
         - DynamoDB
-    - infrastructure.yaml
+    - infrastructure_single.yaml - provision resources for single-node computing (charges may apply):
         - API Gateway
         - Lambda
         - DynamoDB
-    > Web Application Firewall (WAF / WebACL) will need to be provisioned separately and optionally attached to the API using the provided CloudFormation templates.
+    - infrastructure_sam.yaml - template for AWS Serverless Application Repository (charges may apply):
+        - API Gateway
+        - Lambda
+        - Simple Queue Service (SQS)
+        - Simple Notification Service (SNS)
+        - DynamoDB
+    > Web Application Firewall (WAF / WebACL) will need to be provisioned separately and optionally attached to the API.
 
 2. python
     - Python3 Lambda functions and modules for API backends.

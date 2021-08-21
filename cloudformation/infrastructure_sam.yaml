@@ -1,0 +1,536 @@
+AWSTemplateFormatVersion: 2010-09-09
+Transform: AWS::Serverless-2016-10-31
+Description: Distributed computing sample infrastructure using Lambda.
+
+Mappings:
+
+  apigateway:
+    common:
+      burst: 500
+      rate: 1000
+      quota: 10000
+      period: MONTH
+
+  lambda:
+    common:
+      memorysize: 128
+      runtime: python3.8
+      timeout: 3
+  
+  SQSPars:
+    Common:
+      delay: 0
+      visibility: 30
+
+Resources:
+
+  # SQS dead-letter queue.
+  SQSQueueDead:
+    Type: AWS::SQS::Queue
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W48
+            reason: PoC is sufficient with default AWS-owned encryption key.
+    Properties:
+      DelaySeconds: !FindInMap 
+        - SQSPars
+        - Common
+        - delay
+      VisibilityTimeout: !FindInMap 
+        - SQSPars
+        - Common
+        - visibility
+      ReceiveMessageWaitTimeSeconds: 2
+
+  # SQS queue.
+  SQSQueue:
+    Type: AWS::SQS::Queue
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W48
+            reason: PoC is sufficient with default AWS-owned encryption key.
+    Properties:
+      DelaySeconds: !FindInMap 
+        - SQSPars
+        - Common
+        - delay
+      VisibilityTimeout: !FindInMap 
+        - SQSPars
+        - Common
+        - visibility
+      RedrivePolicy:
+        deadLetterTargetArn : !Sub ${SQSQueueDead.Arn}
+        maxReceiveCount : 5
+    DependsOn:
+      - SQSQueueDead
+  
+  # Dead-letter queue SNS.
+  SNSTopic:
+    Type: AWS::SNS::Topic
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W47
+            reason: PoC is sufficient with default AWS-owned encryption key.
+
+  # DynamoDB table.
+  DynamoDB:
+    Type: AWS::DynamoDB::Table
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W74
+            reason: PoC is sufficient with default AWS-owned encryption key.
+          - id: W78
+            reason: No need for backups in a PoC.
+    Properties: 
+      AttributeDefinitions: 
+        - AttributeName: id
+          AttributeType: S
+      BillingMode: PAY_PER_REQUEST
+      KeySchema: 
+        - AttributeName: id
+          KeyType: HASH
+      PointInTimeRecoverySpecification: 
+        PointInTimeRecoveryEnabled: false
+      SSESpecification: 
+        SSEEnabled: false
+
+  # Data Lambda execution role.
+  lambdaroledata:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+        - 'arn:aws:iam::aws:policy/AWSXrayWriteOnlyAccess'
+      Policies:
+        - PolicyName: !Sub 'DistComp-Data-SQSQueue-${AWS::AccountId}'
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sqs:SendMessage
+                Resource:
+                  - !Sub ${SQSQueue.Arn}
+    DependsOn:
+      - SQSQueue
+  
+  # Process Lambda execution role.
+  lambdaroleprocess:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+        - 'arn:aws:iam::aws:policy/AWSXrayWriteOnlyAccess'
+      Policies:
+        - PolicyName: !Sub 'DistComp-Process-SQSQueue-${AWS::AccountId}'
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                  - sqs:ChangeMessageVisibility
+                Resource:
+                  - !Sub ${SQSQueue.Arn}
+        - PolicyName: !Sub 'DistComp-Process-DynamoDB-${AWS::AccountId}'
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                Resource:
+                  - !Sub ${DynamoDB.Arn}
+    DependsOn:
+      - SQSQueue
+      - DynamoDB
+  
+  # Dead-letter lambda execution role.
+  lambdaroledead:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - 'arn:aws:iam::aws:policy/AWSXrayWriteOnlyAccess'
+      Policies:
+        - PolicyName: !Sub 'DistComp-Dead-SNSPublish-${AWS::AccountId}'
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: sns:Publish
+                Resource: !Sub ${SNSTopic}
+        - PolicyName: !Sub 'DistComp-Dead-SQSQueue-${AWS::AccountId}'
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                  - sqs:ChangeMessageVisibility
+                Resource:
+                  - !Sub ${SQSQueueDead.Arn}
+    DependsOn:
+      - SNSTopic
+
+  # Data Lambda function.
+  lambdafunctiondata:
+    Type: 'AWS::Lambda::Function'
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W58
+            reason: Write to CloudWatch included in AWSLambdaBasicExecutionRole.
+          - id: W89
+            reason: No need to connect to any VPC-based resource.
+          - id: W92
+            reason: No need for reserved concurrency in a PoC.
+    Properties:
+      Description: Distributed computing sample infrastructure using Lambda.
+      Code:
+        S3Bucket: warpedlenses-public
+        S3Key: distributed/lambda_data.zip
+      Environment:
+        Variables:
+          SQSQUEUE: !Sub ${SQSQueue}
+      Handler: lambda_function.lambda_handler
+      MemorySize: !FindInMap 
+        - lambda
+        - common
+        - memorysize
+      Role: !Sub ${lambdaroledata.Arn}
+      Runtime: !FindInMap 
+        - lambda
+        - common
+        - runtime
+      Timeout: !FindInMap 
+        - lambda
+        - common
+        - timeout
+      TracingConfig:
+        Mode: Active  # Active | PassThrough
+    DependsOn:
+      - lambdaroledata
+  
+  # Process Lambda function.
+  lambdafunctionprocess:
+    Type: 'AWS::Lambda::Function'
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W58
+            reason: Write to CloudWatch included in AWSLambdaBasicExecutionRole.
+          - id: W89
+            reason: No need to connect to any VPC-based resource.
+          - id: W92
+            reason: No need for reserved concurrency in a PoC.
+    Properties:
+      Description: Distributed computing sample infrastructure using Lambda.
+      Code:
+        S3Bucket: warpedlenses-public
+        S3Key: distributed/lambda_process.zip
+      Environment:
+        Variables:
+          DBTABLE: !Sub ${DynamoDB}
+      Handler: lambda_function.lambda_handler
+      MemorySize: !FindInMap 
+        - lambda
+        - common
+        - memorysize
+      Role: !Sub ${lambdaroleprocess.Arn}
+      Runtime: !FindInMap 
+        - lambda
+        - common
+        - runtime
+      Timeout: !FindInMap 
+        - lambda
+        - common
+        - timeout
+      TracingConfig:
+        Mode: Active  # Active | PassThrough
+    DependsOn:
+      - lambdaroleprocess
+  
+  # Dead-letter queue Lambda function.
+  lambdafunctiondead:
+    Type: 'AWS::Lambda::Function'
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W58
+            reason: Write to CloudWatch included in AWSLambdaBasicExecutionRole.
+          - id: W89
+            reason: No need to connect to any VPC-based resource.
+          - id: W92
+            reason: No need for reserved concurrency in a PoC.
+    Properties:
+      Description: Distributed computing sample infrastructure using Lambda.
+      Code:
+        S3Bucket: warpedlenses-public
+        S3Key: distributed/lambda_dead.zip
+      Environment:
+        Variables:
+          SNSTOPIC: !Sub ${SNSTopic}
+          SNSSUBJECT: 'DisComp: Data Processing Failure'
+      Handler: lambda_function.lambda_handler
+      MemorySize: !FindInMap 
+        - lambda
+        - common
+        - memorysize
+      Role: !Sub ${lambdaroledead.Arn}
+      Runtime: !FindInMap 
+        - lambda
+        - common
+        - runtime
+      Timeout: !FindInMap 
+        - lambda
+        - common
+        - timeout
+      TracingConfig:
+        Mode: Active  # Active | PassThrough
+    DependsOn:
+      - lambdaroledead
+  
+  LambdaFunctionEventSourceMappingProcess:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      BatchSize: 1
+      MaximumBatchingWindowInSeconds: 0
+      Enabled: true
+      EventSourceArn: !Sub ${SQSQueue.Arn}
+      FunctionName: !Sub ${lambdafunctionprocess.Arn}
+    DependsOn:
+      - SQSQueue
+      - lambdafunctionprocess
+  
+  LambdaFunctionEventSourceMappingDead:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      BatchSize: 1
+      MaximumBatchingWindowInSeconds: 0
+      Enabled: true
+      EventSourceArn: !Sub ${SQSQueueDead.Arn}
+      FunctionName: !Sub ${lambdafunctiondead.Arn}
+    DependsOn:
+      - SQSQueueDead
+      - lambdafunctiondead
+
+  # API.
+  api:
+    Type: 'AWS::ApiGateway::RestApi'
+    Properties:
+      Description: Distributed computing sample infrastructure using Lambda.
+      Name: DistComp
+      ApiKeySourceType: HEADER
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+  requestmodel:
+    Type: AWS::ApiGateway::Model
+    Properties: 
+      ContentType: application/json
+      Description: Request schema model.
+      RestApiId: !Sub ${api}
+      Schema:
+        "$schema": "http://json-schema.org/draft-04/schema#"
+        "title": "DataModel"
+        "type": "object"
+        "properties":
+          "data":
+            "type": "string"
+  requestvalidator:
+    Type: AWS::ApiGateway::RequestValidator
+    Properties: 
+      RestApiId: !Sub ${api}
+      ValidateRequestBody: true
+      ValidateRequestParameters: true
+  resource:
+    Type: 'AWS::ApiGateway::Resource'
+    Properties:
+      ParentId: !Sub ${api.RootResourceId}
+      PathPart: data
+      RestApiId: !Sub ${api}
+  method:
+    Type: 'AWS::ApiGateway::Method'
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W59
+            reason: Not implementing auth.
+    Properties:
+      ApiKeyRequired: true
+      AuthorizationType: NONE
+      HttpMethod: POST
+      Integration:
+        IntegrationHttpMethod: POST
+        IntegrationResponses:
+          - StatusCode: '200'
+        Type: AWS_PROXY
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${lambdafunctiondata.Arn}/invocations
+      MethodResponses:
+        - StatusCode: '200'
+          ResponseModels:
+            "application/json": "Empty"
+          ResponseParameters:
+            "method.response.header.Access-Control-Allow-Origin": true
+      ResourceId: !Sub ${resource}
+      RestApiId: !Sub ${api}
+      RequestModels: 
+        "application/json": !Sub ${requestmodel}
+      RequestParameters: 
+        "method.request.header.x-api-key": true
+      RequestValidatorId: !Sub ${requestvalidator}
+    DependsOn:
+      - resource
+      - lambdafunctiondata
+      - requestvalidator
+  options:
+    Type: 'AWS::ApiGateway::Method'
+    Properties:
+      ApiKeyRequired: false
+      AuthorizationType: NONE
+      HttpMethod: OPTIONS
+      Integration:
+        IntegrationHttpMethod: OPTIONS
+        IntegrationResponses:
+          - StatusCode: '200'
+            ResponseParameters:
+              "method.response.header.Access-Control-Allow-Headers": "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+              "method.response.header.Access-Control-Allow-Methods": "'POST,OPTIONS'"
+              "method.response.header.Access-Control-Allow-Origin": "'*'"
+        PassthroughBehavior: WHEN_NO_MATCH # WHEN_NO_TEMPLATES, WHEN_NO_MATCH, NEVER
+        RequestTemplates:
+          "application/json": "{\"statusCode\": 200}"
+        Type: MOCK
+      MethodResponses:
+        - StatusCode: '200'
+          ResponseModels:
+            "application/json": Empty
+          ResponseParameters:
+            "method.response.header.Access-Control-Allow-Headers": true
+            "method.response.header.Access-Control-Allow-Methods": true
+            "method.response.header.Access-Control-Allow-Origin": true
+      ResourceId: !Sub ${resource}
+      RestApiId: !Sub ${api}
+  lambdapermission:
+    Type: 'AWS::Lambda::Permission'
+    Properties:
+      FunctionName: !Sub ${lambdafunctiondata.Arn}
+      Action: 'lambda:InvokeFunction'
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${api}/*/POST/data'
+    DependsOn:
+      - method
+  stage:
+    Type: 'AWS::ApiGateway::Deployment'
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W45
+            reason: No need for access log settings in a PoC.
+    Properties:
+      RestApiId: !Sub ${api}
+      StageDescription:
+        ThrottlingBurstLimit: !FindInMap 
+          - apigateway
+          - common
+          - burst
+        ThrottlingRateLimit: !FindInMap 
+          - apigateway
+          - common
+          - rate
+      StageName: distcomp
+    DependsOn:
+      - api
+      - method
+      - options
+  usageplan:
+    Type: 'AWS::ApiGateway::UsagePlan'
+    Properties:
+      ApiStages:
+        - ApiId: !Sub ${api}
+          Stage: distcomp
+      Quota:
+        Limit: !FindInMap 
+          - apigateway
+          - common
+          - quota
+        Period: !FindInMap 
+          - apigateway
+          - common
+          - period
+      Throttle:
+        BurstLimit: !FindInMap 
+          - apigateway
+          - common
+          - burst
+        RateLimit: !FindInMap 
+          - apigateway
+          - common
+          - rate
+    DependsOn:
+      - stage
+  apikey:
+    Type: 'AWS::ApiGateway::ApiKey'
+    Properties:
+      Enabled: true
+      StageKeys:
+        - RestApiId: !Sub ${api}
+          StageName: distcomp
+    DependsOn:
+      - api
+      - stage
+  plankey:
+    Type: 'AWS::ApiGateway::UsagePlanKey'
+    Properties:
+      KeyId: !Sub ${apikey}
+      KeyType: API_KEY
+      UsagePlanId: !Sub ${usageplan}
+    DependsOn:
+      - apikey
+      - usageplan
+
+Outputs:
+
+  DataDBTable:
+    Value: !Sub ${DynamoDB}
+    Description: Processed data table.
+  
+  APIGatewayDeploy:
+    Value: !Sub aws apigateway create-deployment --rest-api-id ${api} --stage-name distcomp --description DistComp_stage_activation --profile <Your-AWSCLI-profile>
+    Description: Command to activate API after deployment is complete.

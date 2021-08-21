@@ -8,9 +8,7 @@ Proof-of-concept experiment for distributed computing using AWS Lambda as data c
 
 Fastest:
 
-1. Deploy from AWS Serverless Application Repository: https://console.aws.amazon.com/lambda/home?region=us-east-1#/create/app?applicationId=arn:aws:serverlessrepo:ap-southeast-1:798471383856:applications/lambda-distributed
-
-    > You can change the home region from **us-east-1** to your own working region.
+1. Deploy from AWS Serverless Application Repository: [https://serverlessrepo.aws.amazon.com/applications/ap-southeast-1/798471383856/lambda-distributed](https://serverlessrepo.aws.amazon.com/applications/ap-southeast-1/798471383856/lambda-distributed)
 
 (Just) Slightly less fast:
 

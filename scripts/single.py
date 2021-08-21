@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
+# -*- coding: latin-1 -*-
 """
-Process data in parallel.
+Process data one-by-one.
 
 Usage: python3 <script_file.py> data_file
 """

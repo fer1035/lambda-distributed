@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: latin-1 -*-
 """
 Process data in parallel.
 
